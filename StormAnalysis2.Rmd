@@ -1,0 +1,487 @@
+---
+title: "Harmful severe weather events in the United States"
+output: html_document
+---
+#Summary
+
+This report examines the impact of storms and severe weather events in the United States in terms of human fatalities, human injuries and economic damage. The data were extracted from the U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database and correspond to the years 1996-2011. The data were organized with 49 classifications corresponding to the 48 NOAA-designated event types and an additional "ambiguous" classification for a relatively small number of cases that were difficult to classify. The impact of storms and extreme weather on public health were estimated based by the cumulative number of fatalities and injuries that were linked to each classification. Economic damages were estimated by summing the cumulative amount of property damages and crop damages. Classifications were ranked based on cumulative values and bar plots were generated to represent the top 15 classifications for fatalities, injuries and economic damage. This analysis indicates that (in descending order) excessive heat, tornadoes and flash floods caused the most human deaths, which represents approximately 48% of the total fatalities across all classifications. Tornadoes, floods and excessive heat were responsible for the most human injuries (59% of the total across all classifications). Additionally, floods, hurricanes/typhoons and tornadoes were linked to the greatest amount of economic damage (82% of the total across all classifications).
+
+\pagebreak
+
+\newpage
+
+#Data Processing
+```{r message=FALSE}
+# required packages
+library(dplyr)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(gtable)
+library(tidyr)
+library(knitr)
+library(xtable)
+library(pander)
+```
+The StromData file was downloaded, unzipped and read into R as follows:
+```{r cache = TRUE, warning=FALSE}
+# download data as a csv file and read into R
+if(!file.exists(".data")){dir.create("./data")}   
+URL<-"https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+download.file(URL, destfile = "./data/StormData.csv")
+StormData <- read.csv(("./data/StormData.csv"))
+```
+
+Storm data dimensions:
+```{r}
+dim(StormData)
+```
+
+
+The data were subset such that the retained columns included the event begin dates, the event types, the number of fatalities, the number of injuries as well as four columns containing information about property and crop damages. The data were also then subset to exclude cases not associated with fatalities, injuries, property damage, or crop damage.
+```{r}
+# remove un-needed columns
+storm <- select(StormData, -(STATE__), -(BGN_TIME:STATE), -(BGN_RANGE:MAG),
+                   -(WFO:REFNUM))
+# rename remaining columns 
+names(storm) <- c("date", "event", "fatalities", "injuries", "propdmg",
+                  "propdmg.exp","cropdmg","cropdmg.exp")
+# subset for cases that involve fatalities, injuries and damage
+storm <- filter(storm,
+                fatalities > 0 | injuries > 0 | propdmg > 0 | cropdmg > 0)
+```
+The data were subset further to include only the years 1996-2011 because prior to 1996 NOAA did not keep records on all 48 storm/weather events types. This approach was selected to allow for accurate cross-event comparisons of cumulative.
+```{r}
+# subset data for the years 1996-2011 
+storm$year <- as.character(storm$date)
+storm$year <- strptime(storm$date, format = "%m/%e/%Y %T", tz = "GMT")
+storm$year <- strftime(storm$year, format="%Y")
+storm$year <- as.numeric(storm$year)
+storm <- select(storm, year, event:cropdmg.exp)
+storm.data <- filter(storm,year > 1995)
+```
+
+\pagebreak
+
+\newpage
+
+The National Weather Service Instruction (10-1605, August 17 2007, Table 1) designates these 48 event types
+```{r}
+# list of event types
+et <- c("Astronomical Low Tide", "Avalanche", "Blizzard","Coastal Flood",
+  "Cold/Wind Chill", "Debris Flow", "Dense Fog", "Dense Smoke","Drought", 
+  "Dust Devil", "Dust Storm", "Excessive Heat", "Extreme Cold/Wind Chill",
+  "Flash Flood", "Flood", "Frost/Freeze", "Funnel Cloud", "Freezing Fog", 
+  "Hail", "Heat", "Heavy Rain", "Heavy Snow","High Surf", "High Wind", 
+  "Hurricane (Typhoon)","Ice Storm", "Lake-Effect Snow", "Lakeshore Flood",
+  "Lightning", "Marine Hail", "Marine High Wind", "Marine Strong Wind", 
+  "Marine Thunderstorm Wind","Rip Current", "Seiche", "Sleet", 
+  "Storm Surge/Tide", "Strong Wind", "Thunderstorm Wind", "Tornado", 
+  "Tropical Depression", "Tropical Storm", "Tsunami", "Volcanic Ash",
+  "Waterspout", "Wildfire" ,"Winter Storm ","Winter Weather")
+
+# count number of unique event labels in storm.data$event variable
+unique.event.labels <- as.character(unique(storm.data$event))
+num.unique <- length(unique.event.labels)
+```
+Exploratory examination of the storm.data "event"" variable indicated that there were `r num.unique` unique labels. Some of these elements were due to misspellings, typos, abbreviation, and capitalization differences. There were also many cases that appeared to have non-standard event labels which were not contained in the "et" variable listed above. Consequently, a procedure was developed to reclassify those cases which did not have standard event labels. Two subsets where generated based on whether or not the cases had standard or non-standard labels.
+```{r}
+# subset storm.data depending on whether the row contains an event label from et
+et <- data.frame(et)
+names(et) <- c("Event.type")
+et$Event.type <- tolower(et$Event.type)
+xx <- storm.data
+xx$event <- as.character(xx$event)
+xx$event <- tolower(xx$event)
+storm.mislabel <- xx[!(xx$event %in% et$Event.type),]
+storm.correctlabel <- xx[(xx$event %in% et$Event.type),]
+
+number.mislabled.rows <- nrow(storm.mislabel)
+total.cases <- nrow(storm.data)
+percent.mislabeled <- (number.mislabled.rows/total.cases)*100
+
+
+
+```
+This treatment of the data indicated that approximately `r round(percent.mislabeled)` % of the cases did not exactly match the standard event labels. Therefore, effort was made to reclassify the mislabeled cases. This reclassification was based on guidelines provided in the National Weather Service Instruction (10-1605, August 17 2007). The following code uses string replacement methods to alter the event names. If no satisfactory event label could be determined, it was classified as "ambiguous". An example of an ambiguous case was "gusty wind" because without wind speed information it was deemed unclear whether the event should be considered as "Strong Wind" or "High Wind". *A table in the Appendix section of this document provides a complete list of the reclassifications.*
+
+\pagebreak
+
+\newpage
+
+```{r}
+# clean up the event types by correcting misspellings and typos
+# reclassify and combine similar/synonymous event types into single factors
+# reclassify ambiguous events
+x <- storm.mislabel
+x$event <- as.character(x$event)
+x$event <- tolower(x$event)
+# reclassify ambiguous labels
+x$event[grepl("non-tstm wind", x$event)] <- "ambiguous"
+x$event[grepl("non tstm wind", x$event)] <- "ambiguous"
+x$event[grepl("none|summary|other", x$event)] <- "ambiguous"
+x$event[grepl("coastal storm|coastalstorm", x$event)] <- "ambiguous"
+x$event[grepl("marine accident", x$event)] <- "ambiguous"
+x$event[grepl("no severe weather", x$event)] <- "ambiguous"
+x$event[grepl("drowning", x$event)] <- "ambiguous"
+x$event[grepl("metro", x$event)] <- "ambiguous"
+x$event[grepl("high water", x$event)] <- "ambiguous"
+x$event[grepl("non-severe wind damage", x$event)] <- "ambiguous"
+x$event[grepl("gusty|gradient wind|wind damage|wind and wave", 
+              x$event)] <- "ambiguous"
+x$event[grepl("whirlwind|rogue wave", x$event)] <- "ambiguous"
+x$event[grepl("^wind$|^winds$", x$event)] <- "ambiguous"
+x$event[grepl("^rain$|unseasonal rain", x$event)] <- "ambiguous"
+x$event[grepl("heavy seas|high seas|rough seas", x$event)] <- "ambiguous"
+x$event[grepl("coastal erosion|beach erosion", x$event)] <- "ambiguous"
+# reclassify and correct event labels
+x$event[grepl("blizzard", x$event)] <- "blizzard"
+x$event[grepl("marine tstm wind", x$event)] <- "marine thunderstorm wind"
+x$event[grepl("strong winds", x$event)] <- "strong wind"
+x$event[grepl("tstm heavy rain|torrential|hvy rain$", x$event)] <- "heavy rain"
+x$event[grepl("^tstm wind|^ tstm wind|tstm wnd|downburst|gustnado|microburst",
+              x$event)] <- "thunderstorm wind"
+x$event[grepl("thunderstorm wind \\(g40", x$event)] <- "thunderstorm wind"
+x$event[grepl("coastal flooding|coastal  flooding|cstl flood", 
+              x$event)] <-"coastal flood"
+x$event[grepl("astronomical high tide", x$event)] <-"coastal flood"
+x$event[grepl("flash|dam break|ice jam flood", x$event)] <-"flash flood"
+x$event[grepl("surge|tidal", x$event)] <- "storm surge/tide"
+x$event[grepl("flooding|urban flo|river flo|flood/s", x$event)] <- "flood"
+x$event[grepl("fld", x$event)] <- "flood"
+x$event[grepl("volca|vog", x$event)] <- "volcanic ash"
+x$event[grepl("lightning", x$event)] <- "lightning"
+x$event[grepl("heavy rain/high surf|heavy rain", x$event)] <- "heavy rain"
+x$event[grepl("surf|swells", x$event)] <- "high surf"
+x$event[grepl("^tstm$|thunderstorms|severe thunder", 
+              x$event)] <- "thunderstorm wind"
+x$event[grepl("^thunderstorm$", x$event)] <- "thunderstorm wind"
+x$event[grepl("devel", x$event)] <- "dust devil"
+x$event[grepl("dust", x$event)] <- "dust storm"
+x$event[grepl("waters", x$event)] <- "waterspout"
+x$event[grepl("hurric|typhoon|floyd", x$event)] <- "hurricane (typhoon)"
+x$event[grepl("small hail|gusty wind/hail", x$event)] <- "hail"
+x$event[grepl("torn|landspout", x$event)] <- "tornado"
+x$event[grepl("lake effect", x$event)] <- "lake-effect snow"
+x$event[grepl("mud|landsl|rock", x$event)] <- "debris flow"
+x$event[grepl("heavy snow shower|excessive snow|squall", 
+              x$event)] <- "heavy snow"
+x$event[grepl("freeze|frost", x$event)] <- "frost/freeze"
+x$event[grepl("heat|hyperthermia|warm weather|unseasonably warm", 
+              x$event)] <- "heat"
+x$event[grepl("extreme windchill", x$event)] <- "extreme cold/wind chill"
+x$event[grepl("fire", x$event)] <- "wildfire"
+x$event[grepl("high winds|high wind \\(g40", x$event)] <- "high wind"
+x$event[grepl("rip currents", x$event)] <- "rip current"
+x$event[grepl("extreme cold", x$event)] <- "extreme cold/wind chill"
+x$event[grepl("cold |unseasonable cold|extended cold|unseasonably cold",
+              x$event)] <- "cold/wind chill"
+x$event[grepl("^cold$", x$event)] <- "cold/wind chill"
+x$event[grepl("fog", x$event)] <- "dense fog"
+x$event[grepl("winter weather|glaze|ice roads|light snow|freezing|wintry|mixed", 
+              x$event)] <- "winter weather"
+x$event[grepl("snow and ice|falling snow/ice", x$event)] <- "winter storm"
+x$event[grepl("black ice|blowing snow|ice on road|late season snow|icy roads", 
+              x$event)] <- "winter weather"
+x$event[grepl("rain/snow", x$event)] <- "winter weather"
+x$event[grepl("^snow$", x$event)] <- "winter weather"
+number.ambiguous.cases <-nrow(filter(x, event == "ambiguous"))
+
+```
+This procedure classified `r number.ambiguous.cases` cases as "ambiguous".
+
+The output of the procedure was then recombined with the storm.data.correctlabel subset.
+```{r}
+# bind corrected df with original storm.correctlabel df
+storm.data.new.labels <- rbind(storm.correctlabel, x)
+sdnl <- storm.data.new.labels
+```
+The property damage and crop damage data is represented in 4 columns. The "propdmg" and "cropdmg" variables list numeric values for each case, while the "propdmg.exp" and "cropdmg.exp" variables provide a code for a multiplier representing a thousand, million, or billion. A key-value data frame was created to decode the multipliers and recalculate the cost of the damage associated with each case. The property and crop damage for each case were summated to create a total cost variable represented in billions of US dollars.
+```{r}
+# create data frame with key-values of multiplier codes
+code <- c("k", "K", "m", "M", "b", "B")
+mult <- c("1000", "1000", "1000000", "1000000","1000000000", "1000000000")
+key <- cbind(code, mult)
+key <- as.data.frame(key)
+key$mult <- as.character(key$mult)
+key$code <- as.character(key$code)
+# add columns for multipler values
+sdnl$prop.mult <- ""
+sdnl$crop.mult <- ""
+sdnl$propdmg.exp <- as.character(sdnl$propdmg.exp)
+sdnl$cropdmg.exp <- as.character(sdnl$cropdmg.exp)
+#match key and add values data frame
+sdnl$prop.mult <- key[,2][match(sdnl$propdmg.exp, key[,1])]
+sdnl$crop.mult <- key[,2][match(sdnl$cropdmg.exp, key[,1])]
+sdnl$prop.mult <- as.numeric(sdnl$prop.mult)
+sdnl$crop.mult <- as.numeric(sdnl$crop.mult)
+# use multiplier to calclulate cost of each event
+sdnl <- mutate(sdnl, prop.cost = propdmg * prop.mult)
+sdnl <- mutate(sdnl, crop.cost = cropdmg * crop.mult)
+sdnl <- mutate(sdnl, total.cost = (crop.cost + prop.cost)/1000000000)
+storm.summary <- select(sdnl, -(propdmg:crop.cost))
+```
+To address the question regarding which event types are the most harmful with respect to population health the storm summary was subset for those cases involving either fatalities or injuries, and the cumulative number for each event was calculated. The data were then ranked and additional subsets were generated which contained only the top 15 event types of each variable.
+```{r}
+#subset for fatalities and injuries graph of top 15 events for each
+storm.health <- filter(storm.summary, fatalities > 0 | injuries > 0)
+# calculate number of fatalities by event type
+group_by(storm.health, event) %>%
+summarize(sum(fatalities)) -> storm.fat
+names(storm.fat) <- c("event", "fatalities")
+filter(storm.fat, fatalities >= 115) %>%
+arrange(fatalities) -> fatal
+fatal$event <- with(fatal, factor(event, levels = event))
+# calculate number of injuries by event type
+group_by(storm.health, event) %>%
+        summarize(sum(injuries)) -> storm.inj
+names(storm.inj) <- c("event", "injuries")
+filter(storm.inj, injuries >= 700) %>% 
+arrange(injuries) -> injury
+injury$event <- with(injury, factor(event, levels = event)) 
+
+```
+To address the question regarding which event types generated the most economic damage, the storm summary was subset for those cases involving such damage. The data were then ranked an additional subset was generated which contained only the top 15 event types.
+```{r}
+#subset for the top 15 event types with respect to cast
+storm.cost <- filter(storm.summary, total.cost > 0)
+
+group_by(storm.cost, event) %>%
+        summarize(sum(total.cost)) -> storm.cost2
+names(storm.cost2) <- c("event", "Billions")
+filter(storm.cost2, Billions >= .493) %>%
+        arrange(Billions) -> cost
+cost$event <- with(cost, factor(event, levels = event))
+
+```
+Additional calculations were performed to summarize the results.
+```{r}
+# estimate of total number of fatalities across all event types
+total.f <- sum(storm.fat$fatalities)
+total.f
+# estimate of total number of injuries across all event types
+total.i <- sum(storm.inj$injuries)
+total.i
+# caculate the total number of event types associated with deaths or injuries
+deadly.events <- filter(storm.fat, fatalities > 0)
+events.with.f <- length(unique(deadly.events$event))
+injurious.events <- filter(storm.inj, injuries > 0)
+events.with.i <- length(unique(injurious.events$event))
+# estimate of proportion of deaths associated with top three event types
+top3.fatalities <- (sum(fatal[13:15,2])/total.f) * 100
+# estimate of proportion of injuries associated with top three event types
+top3.injuries <- (sum(injury[13:15,2])/total.i) * 100
+# estimate of economic damage across all event types (in Billions)
+total.cost <- sum(storm.cost2$Billions)
+total.cost
+# estimate of economic damage associated with top three event types (Billions)
+top3.cost <- (sum(cost[13:15,2])/total.cost) * 100
+top3.cost
+```
+Here is the code for the fatality and injury plots
+```{r}
+f1 = ggplot(data = fatal, aes(y = fatalities, x = event)) +
+        geom_bar(position="dodge",stat="identity", fill = "darkred") +
+        coord_flip() +
+        ggtitle("Cumulative fatalities (1996-2011)")+
+        scale_fill_grey() +
+        theme_bw() +
+        theme(
+                axis.title.y=element_blank(), 
+                axis.title.x=element_blank(), 
+                text=element_text(family="serif",size=15),
+                plot.title=element_text(face="bold",hjust=c(0,0)))
+
+f2 = ggplot(data = injury, aes(y = injuries, x = event)) +
+        geom_bar(position="dodge",stat="identity", fill = "navy") +
+        coord_flip() +
+        ggtitle("Cumulative injuries (1996-2011)")+
+        scale_fill_grey() +
+        theme_bw() +
+        theme(
+                axis.title.y=element_blank(), 
+                axis.title.x=element_blank(), 
+                text=element_text(family="serif",size=15),
+                plot.title=element_text(face="bold",hjust=c(0,0)))
+
+# align two plots by axis
+gl <- lapply(list(f1, f2), ggplotGrob)
+widths <- do.call(unit.pmax, lapply(gl, "[[", "widths"))
+heights <- do.call(unit.pmax, lapply(gl, "[[", "heights"))
+lg <- lapply(gl, function(g) {g$widths <- widths; g$heights <- heights; g})
+gt = rbind(lg[[1]], lg[[2]], size = "first")
+gt$heights[5] = list(unit(0, "lines"))
+```
+Here is the code for the economic damage plot
+```{r}
+f3 = ggplot(data = cost, aes(y = Billions, x = event)) +
+        geom_bar(position="dodge",stat="identity", fill = "darkgreen") +
+        coord_flip() +
+        ylab("Billions of US Dollars") +
+        ggtitle("Cumulative economic damage (1996-2011)") +
+        scale_fill_grey() +
+        theme_bw() +
+        theme(
+                axis.title.y=element_blank(), 
+                text=element_text(family="serif",size=15),
+                plot.title=element_text(face="bold",hjust=c(0,0)))
+```
+
+\pagebreak
+
+\newpage
+
+#Results
+
+**Which types of events are most harmful with respect to population health?**
+
+* Between the years 1996-2011, extreme weather events in the USA were associated with `r total.f` fatalities and $`r format(total.i, scientific = FALSE)`$ injuries
+
+* There were `r events.with.f` event types (inclusive of the "ambiguous" classification) associated with fatalities.
+
+* In addition, here were `r events.with.i` event types (inclusive of the "ambiguous" classification) that were associated with injuries.
+
+* The top 3 most deadly event types (excessive heat, tornadoes and flash floods) were responsible for `r round(top3.fatalities)`% of the total number of the deaths. 
+
+* The top 3 most injurious event types (tornadoes, floods and excessive heat) were responsible for `r round(top3.injuries)`% of the total number of the injuries. 
+
+* Here is a graph representing the cumulative number of fatalities (top panel) and injuries (bottom panel) for the top 15 ranked event types.
+
+```{r fig.height= 5}
+# draw figure
+grid.newpage()
+grid.draw(gt)
+```
+
+\pagebreak
+
+\newpage
+
+**Which types of events have the greatest economic consequences?**
+
+* Between the years 1996-2011, extreme weather events were associated with `r round(total.cost)` billion US Dollars in damage.
+
+* The top three event types were associated with `r round(top3.cost)`% of the total costs.
+
+Here is a bar plot representing the top 15 most costly storm types.
+```{r fig.height= 3}
+# draw figure
+grid.newpage()
+grid.draw(f3)
+```
+
+\pagebreak
+
+\newpage
+
+#Appendix
+
+Here is a the code and a table describing the reclassification scheme used to 
+reclassify mislabeled event types. In the table each original label is separated by a comma.
+```{r tidy = TRUE}
+# generalte table representing the correspondance between the old and new
+# labels for those that were recategorized
+
+z <- storm.mislabel
+z$event.copy <- z$event 
+z <- select(z, event.copy, event)
+z$event.copy <- as.character(z$event.copy)
+z$event.copy <- tolower(z$event.copy)
+
+z$event.copy[grepl("non-tstm wind", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("non tstm wind", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("none|summary|other", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("coastal storm|coastalstorm", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("marine accident", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("no severe weather", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("drowning", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("metro", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("high water", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("non-severe wind damage", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("gusty|gradient wind|wind damage|wind and wave", 
+                   z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("whirlwind|rogue wave", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("^wind$|^winds$", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("^rain$|unseasonal rain", z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("heavy seas|high seas|rough seas",
+                   z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("coastal erosion|beach erosion",
+                   z$event.copy)] <- "ambiguous"
+z$event.copy[grepl("blizzard", z$event.copy)] <- "blizzard"
+z$event.copy[grepl("marine tstm wind",
+                   z$event.copy)] <- "marine thunderstorm wind"
+z$event.copy[grepl("strong winds", z$event.copy)] <- "strong wind"
+z$event.copy[grepl("tstm heavy rain|torrential|hvy rain$",
+                   z$event.copy)] <- "heavy rain"
+z$event.copy[grepl("^tstm wind|^ tstm wind|tstm wnd|downburst|gustnado|microbu",
+                   z$event.copy)] <- "thunderstorm wind"
+z$event.copy[grepl("thunderstorm wind \\(g40",
+                   z$event.copy)] <- "thunderstorm wind"
+z$event.copy[grepl("coastal flooding|coastal  flooding|cstl flood", 
+                   z$event)] <-"coastal flood"
+z$event.copy[grepl("astronomical high tide", z$event)] <-"coastal flood"
+z$event.copy[grepl("flash|dam break|ice jam flood",
+                   z$event.copy)] <-"flash flood"
+z$event.copy[grepl("surge|tidal", z$event.copy)] <- "storm surge/tide"
+z$event.copy[grepl("flooding|urban flo|river flo|flood/s",
+                   z$event.copy)] <- "flood"
+z$event.copy[grepl("fld", z$event.copy)] <- "flood"
+z$event.copy[grepl("volca|vog", z$event.copy)] <- "volcanic ash"
+z$event.copy[grepl("lightning", z$event.copy)] <- "lightning"
+z$event.copy[grepl("heavy rain/high surf|heavy rain",
+                   z$event.copy)] <- "heavy rain"
+z$event.copy[grepl("surf|swells", z$event.copy)] <- "high surf"
+z$event.copy[grepl("^tstm$|thunderstorms|severe thunder", 
+                   z$event.copy)] <- "thunderstorm wind"
+z$event.copy[grepl("^thunderstorm$", z$event.copy)] <- "thunderstorm wind"
+z$event.copy[grepl("devel", z$event.copy)] <- "dust devil"
+z$event.copy[grepl("dust", z$event.copy)] <- "dust storm"
+z$event.copy[grepl("waters", z$event.copy)] <- "waterspout"
+z$event.copy[grepl("hurric|typhoon|floyd",
+                   z$event.copy)] <- "hurricane (typhoon)"
+z$event.copy[grepl("small hail|gusty wind/hail", z$event.copy)] <- "hail"
+z$event.copy[grepl("torn|landspout", z$event.copy)] <- "tornado"
+z$event.copy[grepl("lake effect", z$event.copy)] <- "lake-effect snow"
+z$event.copy[grepl("mud|landsl|rock", z$event.copy)] <- "debris flow"
+z$event.copy[grepl("heavy snow shower|excessive snow|squall", 
+                   z$event.copy)] <- "heavy snow"
+z$event.copy[grepl("freeze|frost", z$event.copy)] <- "frost/freeze"
+z$event.copy[grepl("heat|hyperthermia|warm weather|unseasonably warm", 
+                   z$event.copy)] <- "heat"
+z$event.copy[grepl("extreme windchill",
+                   z$event.copy)] <- "extreme cold/wind chill"
+z$event.copy[grepl("fire", z$event.copy)] <- "wildfire"
+z$event.copy[grepl("high winds|high wind \\(g40", z$event.copy)] <- "high wind"
+z$event.copy[grepl("rip currents", z$event.copy)] <- "rip current"
+z$event.copy[grepl("extreme cold", z$event.copy)] <- "extreme cold/wind chill"
+z$event.copy[grepl("cold |unseasonable cold|extended cold|unseasonably cold",
+                   z$event.copy)] <- "cold/wind chill"
+z$event.copy[grepl("^cold$", z$event.copy)] <- "cold/wind chill"
+z$event.copy[grepl("fog", z$event.copy)] <- "dense fog"
+z$event.copy[grepl("winter weather|glaze|ice roads|light snow|freezing|mixed", 
+                   z$event.copy)] <- "winter weather"
+z$event.copy[grepl("snow and ice|falling snow/ice", 
+                   z$event.copy)] <- "winter storm"
+z$event.copy[grepl("black ic|blowing snow|ice on road|late season sno|icy road", 
+                   z$event.copy)] <- "winter weather"
+z$event.copy[grepl("rain/snow|wintry", z$event.copy)] <- "winter weather"
+z$event.copy[grepl("^snow$", z$event.copy)] <- "winter weather"
+
+zz <- z[!duplicated(z$event), ]
+zz <- arrange(zz, event.copy)
+zz <- spread(zz, event.copy, event)
+zz <- sapply(zz, as.character)
+zz[is.na(zz)] <- ""
+zz <- as.data.frame(t(zz))
+zz <- unite(zz, original.labels, V1:V142, sep =",")
+zz$original.labels <- gsub("^,*|(?<=,),|,*$", "", zz$original.labels, perl=T)
+zz <- cbind(event = rownames(zz), zz)
+rownames(zz) <- NULL
+reclassify.table <- zz
+xt <- xtable(reclassify.table)
+pander::pander(xt, split.cell = 80, split.table = Inf, 
+               justify = c("left","left"))
+
+```
+
+
