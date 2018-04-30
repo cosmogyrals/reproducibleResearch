@@ -3,4 +3,3 @@ Atmospheric Administration’s (NOAA) storm database and correspond to the years
 
 The input data file contained 907297 rows and 37 columns.
 
-![Storm Analysis] https://github.com/cosmogyrals/reproducibleResearch/blob/master/StormAnalysis2.pdf
